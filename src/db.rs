@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 pub const STATUSES: [&str; 4] = ["open", "in-progress", "blocked", "closed"];
 
@@ -38,6 +38,8 @@ pub struct IssueDetail {
     pub comments: Vec<Comment>,
     pub blocked_by: Vec<i64>,
     pub blocks: Vec<i64>,
+    pub parents: Vec<i64>,
+    pub children: Vec<i64>,
 }
 
 #[derive(Debug)]
@@ -104,10 +106,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (issue_id, depends_on)
         );
 
+        CREATE TABLE IF NOT EXISTS issue_parents (
+            issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            parent_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+            PRIMARY KEY (issue_id, parent_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_issue_labels_issue ON issue_labels(issue_id);
         CREATE INDEX IF NOT EXISTS idx_comments_issue ON comments(issue_id);
         CREATE INDEX IF NOT EXISTS idx_dependencies_issue ON dependencies(issue_id);
         CREATE INDEX IF NOT EXISTS idx_dependencies_depends ON dependencies(depends_on);
+        CREATE INDEX IF NOT EXISTS idx_issue_parents_issue ON issue_parents(issue_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_parents_parent ON issue_parents(parent_id);
         "#,
     )
     .context("initializing schema")?;
@@ -132,6 +142,7 @@ pub fn list_issues(
     conn: &Connection,
     status: Option<&str>,
     label: Option<&str>,
+    parent: Option<i64>,
 ) -> Result<Vec<IssueSummary>> {
     let mut sql = String::from("SELECT i.id, i.title, i.status FROM issues i");
     let mut conds: Vec<String> = Vec::new();
@@ -141,6 +152,9 @@ pub fn list_issues(
         sql.push_str(" JOIN issue_labels il ON il.issue_id = i.id");
         sql.push_str(" JOIN labels lb ON lb.id = il.label_id");
     }
+    if parent.is_some() {
+        sql.push_str(" JOIN issue_parents ip ON ip.issue_id = i.id");
+    }
     if let Some(s) = status {
         conds.push(format!("i.status = ?{}", conds.len() + 1));
         args.push(s.to_string());
@@ -148,6 +162,10 @@ pub fn list_issues(
     if let Some(l) = label {
         conds.push(format!("lb.name = ?{}", conds.len() + 1));
         args.push(l.to_string());
+    }
+    if let Some(p) = parent {
+        conds.push(format!("ip.parent_id = ?{}", conds.len() + 1));
+        args.push(p.to_string());
     }
     if !conds.is_empty() {
         sql.push_str(" WHERE ");
@@ -173,12 +191,16 @@ pub fn list_issues(
     Ok(out)
 }
 
-pub fn frontier(conn: &Connection, label: Option<&str>) -> Result<Vec<IssueSummary>> {
-    open_issues(conn, label, false)
+pub fn frontier(
+    conn: &Connection,
+    label: Option<&str>,
+    map: Option<i64>,
+) -> Result<Vec<IssueSummary>> {
+    open_issues(conn, label, map, false)
 }
 
 pub fn blocked(conn: &Connection, label: Option<&str>) -> Result<Vec<BlockedSummary>> {
-    let issues = open_issues(conn, label, true)?;
+    let issues = open_issues(conn, label, None, true)?;
     let mut out = Vec::new();
     for summary in issues {
         let blocked_by = unresolved_dependencies(conn, summary.id)?;
@@ -192,53 +214,69 @@ pub fn blocked(conn: &Connection, label: Option<&str>) -> Result<Vec<BlockedSumm
 }
 
 pub fn ready_for_agent(conn: &Connection) -> Result<Vec<IssueSummary>> {
-    let mut issues = list_issues(conn, None, Some("ready-for-agent"))?;
+    let mut issues = list_issues(conn, None, Some("ready-for-agent"), None)?;
     issues.retain(|i| i.status == "open");
     Ok(issues)
 }
 
-fn open_issues(conn: &Connection, label: Option<&str>, blocked: bool) -> Result<Vec<IssueSummary>> {
+fn open_issues(
+    conn: &Connection,
+    label: Option<&str>,
+    map: Option<i64>,
+    blocked: bool,
+) -> Result<Vec<IssueSummary>> {
     let mut sql = format!(
         "SELECT i.id, i.title, i.status FROM issues i
          WHERE i.status = 'open'
            AND {} (SELECT 1 FROM dependencies d
                    JOIN issues dep ON dep.id = d.depends_on
-                   WHERE d.issue_id = i.id AND dep.status <> 'closed')",
+                   WHERE d.issue_id = i.id AND dep.status <> 'closed')
+           AND NOT EXISTS (SELECT 1 FROM issue_parents ip WHERE ip.parent_id = i.id)",
         if blocked { "EXISTS" } else { "NOT EXISTS" },
     );
+    if map.is_none() {
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM issue_parents ip WHERE ip.issue_id = i.id)");
+    }
     let mut args: Vec<String> = Vec::new();
 
     if let Some(l) = label {
-        sql.push_str(" AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id WHERE il.issue_id = i.id AND lb.name = ?1)");
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM issue_labels il JOIN labels lb ON lb.id = il.label_id WHERE il.issue_id = i.id AND lb.name = ?{})",
+            args.len() + 1
+        ));
         args.push(l.to_string());
+    }
+    if let Some(m) = map {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM issue_parents ipm WHERE ipm.issue_id = i.id AND ipm.parent_id = ?{})",
+            args.len() + 1
+        ));
+        args.push(m.to_string());
     }
     sql.push_str(" ORDER BY i.id");
 
     let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(args), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let mut out = Vec::new();
-    if args.is_empty() {
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            out.push(summary_from_row(conn, row)?);
-        }
-    } else {
-        let mut rows = stmt.query(params![args[0]])?;
-        while let Some(row) = rows.next()? {
-            out.push(summary_from_row(conn, row)?);
-        }
+    for row in rows {
+        let (id, title, status) = row?;
+        out.push(summary_from_row(conn, id, &title, &status)?);
     }
     Ok(out)
 }
 
-fn summary_from_row(conn: &Connection, row: &Row) -> Result<IssueSummary> {
-    let id: i64 = row.get(0)?;
-    let title: String = row.get(1)?;
-    let status: String = row.get(2)?;
+fn summary_from_row(conn: &Connection, id: i64, title: &str, status: &str) -> Result<IssueSummary> {
     let labels = labels_for(conn, id)?;
     Ok(IssueSummary {
         id,
-        title,
-        status,
+        title: title.to_string(),
+        status: status.to_string(),
         labels,
     })
 }
@@ -281,12 +319,24 @@ pub fn get_issue(conn: &Connection, id: i64) -> Result<Option<IssueDetail>> {
         "SELECT issue_id FROM dependencies WHERE depends_on = ?1",
         id,
     )?;
+    let parents = dependency_ids(
+        conn,
+        "SELECT parent_id FROM issue_parents WHERE issue_id = ?1",
+        id,
+    )?;
+    let children = dependency_ids(
+        conn,
+        "SELECT issue_id FROM issue_parents WHERE parent_id = ?1",
+        id,
+    )?;
     Ok(Some(IssueDetail {
         issue,
         labels,
         comments,
         blocked_by,
         blocks,
+        parents,
+        children,
     }))
 }
 
@@ -304,6 +354,47 @@ pub fn update_status(conn: &Connection, id: i64, status: &str) -> Result<Issue> 
     if changed == 0 {
         bail!("issue {id} not found");
     }
+    Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
+}
+
+pub fn update_issue(
+    conn: &Connection,
+    id: i64,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<Issue> {
+    ensure_issue_exists(conn, id)?;
+    let now = now_rfc3339();
+    match (title, body) {
+        (Some(t), Some(b)) => {
+            conn.execute(
+                "UPDATE issues SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
+                params![t, b, now, id],
+            )?;
+        }
+        (Some(t), None) => {
+            conn.execute(
+                "UPDATE issues SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![t, now, id],
+            )?;
+        }
+        (None, Some(b)) => {
+            conn.execute(
+                "UPDATE issues SET body = ?1, updated_at = ?2 WHERE id = ?3",
+                params![b, now, id],
+            )?;
+        }
+        (None, None) => bail!("nothing to update"),
+    }
+    Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
+}
+
+pub fn append_body(conn: &Connection, id: i64, text: &str) -> Result<Issue> {
+    ensure_issue_exists(conn, id)?;
+    conn.execute(
+        "UPDATE issues SET body = body || ?1, updated_at = ?2 WHERE id = ?3",
+        params![text, now_rfc3339(), id],
+    )?;
     Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
 }
 
@@ -370,6 +461,37 @@ pub fn add_dependency(conn: &Connection, issue_id: i64, depends_on: i64) -> Resu
         params![issue_id, depends_on],
     )?;
     Ok(())
+}
+
+pub fn remove_dependency(conn: &Connection, issue_id: i64, depends_on: i64) -> Result<bool> {
+    ensure_issue_exists(conn, issue_id)?;
+    ensure_issue_exists(conn, depends_on)?;
+    let removed = conn.execute(
+        "DELETE FROM dependencies WHERE issue_id = ?1 AND depends_on = ?2",
+        params![issue_id, depends_on],
+    )?;
+    Ok(removed > 0)
+}
+
+pub fn add_membership(conn: &Connection, issue_id: i64, parent_id: i64) -> Result<bool> {
+    ensure_issue_exists(conn, issue_id)?;
+    ensure_issue_exists(conn, parent_id)?;
+    if issue_id == parent_id {
+        bail!("an issue cannot be its own parent");
+    }
+    let added = conn.execute(
+        "INSERT OR IGNORE INTO issue_parents (issue_id, parent_id) VALUES (?1, ?2)",
+        params![issue_id, parent_id],
+    )?;
+    Ok(added > 0)
+}
+
+pub fn remove_membership(conn: &Connection, issue_id: i64, parent_id: i64) -> Result<bool> {
+    let removed = conn.execute(
+        "DELETE FROM issue_parents WHERE issue_id = ?1 AND parent_id = ?2",
+        params![issue_id, parent_id],
+    )?;
+    Ok(removed > 0)
 }
 
 fn fetch_issue(conn: &Connection, id: i64) -> Result<Option<Issue>> {

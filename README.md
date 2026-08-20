@@ -55,6 +55,17 @@ Add dependency:
 
 `--on` is repeatable: `issues depends 5 --on 3 --on 4`.
 
+## Human view
+
+Add `--pretty` (or its alias `--human`) to any read command for a view styled
+for people at a terminal: `issues get 1 --pretty` renders the body and comments
+as markdown (bold, emphasis, headers, reverse-video inline code, single-color
+code blocks), and the list-family commands color-code statuses and labels.
+
+Colorization only happens when stdout is a terminal. Piped or redirected output
+is identical to the plain form, so agent pipelines see byte-stable text either
+way. Set `NO_COLOR` to force plain output on a terminal.
+
 ## Wayfinding and triage views
 
 The agent grab queue (open issues labelled `ready-for-agent`):

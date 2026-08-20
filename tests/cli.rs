@@ -281,6 +281,7 @@ fn dependencies_render_on_get() {
 
     cmd(Path::new(&db))
         .arg("depends")
+        .arg("add")
         .arg("2")
         .arg("--on")
         .arg("1")
@@ -304,12 +305,62 @@ fn dependencies_render_on_get() {
 
     cmd(Path::new(&db))
         .arg("depends")
+        .arg("add")
         .arg("2")
         .arg("--on")
         .arg("1")
         .assert()
         .success()
         .stdout(predicate::str::contains("now depends on #1"));
+}
+
+#[test]
+fn depends_remove_clears_edge() {
+    let (_dir, db) = create_test_db();
+    for title in ["first", "second"] {
+        cmd(Path::new(&db))
+            .arg("create")
+            .arg("--title")
+            .arg(title)
+            .assert()
+            .success();
+    }
+
+    cmd(Path::new(&db))
+        .arg("depends")
+        .arg("add")
+        .arg("2")
+        .arg("--on")
+        .arg("1")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("depends")
+        .arg("remove")
+        .arg("2")
+        .arg("--on")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no longer depends on #1"));
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("2")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Blocked by: #1").not());
+
+    cmd(Path::new(&db))
+        .arg("depends")
+        .arg("remove")
+        .arg("2")
+        .arg("--on")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("does not depend on #1"));
 }
 
 #[test]
@@ -324,6 +375,7 @@ fn depends_rejects_self_dependency() {
 
     cmd(Path::new(&db))
         .arg("depends")
+        .arg("add")
         .arg("1")
         .arg("--on")
         .arg("1")
@@ -382,6 +434,7 @@ fn seed_wayfinder(db: &str) {
     // 2 depends on 1; 4 depends on 2 and 3
     cmd(Path::new(db))
         .arg("depends")
+        .arg("add")
         .arg("2")
         .arg("--on")
         .arg("1")
@@ -389,6 +442,7 @@ fn seed_wayfinder(db: &str) {
         .success();
     cmd(Path::new(db))
         .arg("depends")
+        .arg("add")
         .arg("4")
         .arg("--on")
         .arg("2")
@@ -396,6 +450,7 @@ fn seed_wayfinder(db: &str) {
         .success();
     cmd(Path::new(db))
         .arg("depends")
+        .arg("add")
         .arg("4")
         .arg("--on")
         .arg("3")
@@ -521,4 +576,380 @@ fn agent_instructions_writes_doc() {
     assert!(contents.contains("issues list"));
     assert!(contents.contains("ready-for-agent"));
     assert!(contents.contains("issues frontier"));
+    assert!(contents.contains("issues depends add"));
+    assert!(contents.contains("issues attach"));
+}
+
+#[test]
+fn update_title_body_and_append() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("original")
+        .arg("--body")
+        .arg("base body")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--title")
+        .arg("renamed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated issue #1: renamed"));
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--append-body")
+        .arg(" appended bit")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--body")
+        .arg("replaced")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Issue #1: renamed"))
+        .stdout(predicate::str::contains("replaced"))
+        .stdout(predicate::str::contains("base body").not())
+        .stdout(predicate::str::contains("appended bit").not());
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing to update"));
+}
+
+#[test]
+fn update_body_from_file() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    let body_file = _dir.path().join("new_body.md");
+    std::fs::write(&body_file, "from file").unwrap();
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--body-file")
+        .arg(&body_file)
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("from file"));
+}
+
+#[test]
+fn close_with_comment_records_comment() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("close")
+        .arg("1")
+        .arg("--comment")
+        .arg("done via subagent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Closed issue #1"))
+        .stdout(predicate::str::contains("Added comment #1"));
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status: closed"))
+        .stdout(predicate::str::contains("done via subagent"));
+}
+
+#[test]
+fn comment_body_from_file() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    let body_file = _dir.path().join("comment.md");
+    std::fs::write(&body_file, "comment from file").unwrap();
+    cmd(Path::new(&db))
+        .arg("comment")
+        .arg("1")
+        .arg("--body-file")
+        .arg(&body_file)
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("comment from file"));
+}
+
+fn seed_map(db: &str) {
+    cmd(Path::new(db))
+        .arg("create")
+        .arg("--title")
+        .arg("map")
+        .assert()
+        .success();
+    for title in ["child a", "child b", "orphan"] {
+        cmd(Path::new(db))
+            .arg("create")
+            .arg("--title")
+            .arg(title)
+            .assert()
+            .success();
+    }
+    cmd(Path::new(db))
+        .arg("attach")
+        .arg("2")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success();
+    cmd(Path::new(db))
+        .arg("attach")
+        .arg("3")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success();
+}
+
+#[test]
+fn attach_detach_and_frontier_excludes_parents() {
+    let (_dir, db) = create_test_db();
+    seed_map(&db);
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("2")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parents: #1"));
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Children: #2, #3"));
+
+    cmd(Path::new(&db))
+        .arg("list")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("child a"))
+        .stdout(predicate::str::contains("child b"))
+        .stdout(predicate::str::contains("orphan").not());
+
+    cmd(Path::new(&db))
+        .arg("frontier")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("orphan"))
+        .stdout(predicate::str::contains("map").not())
+        .stdout(predicate::str::contains("child a").not())
+        .stdout(predicate::str::contains("1 issue(s)."));
+
+    cmd(Path::new(&db))
+        .arg("frontier")
+        .arg("--map")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("child a"))
+        .stdout(predicate::str::contains("child b"))
+        .stdout(predicate::str::contains("orphan").not())
+        .stdout(predicate::str::contains("2 issue(s)."));
+
+    cmd(Path::new(&db))
+        .arg("detach")
+        .arg("2")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Detached issue #2 from #1"));
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("2")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Parents").not());
+}
+
+#[test]
+fn attach_rejects_self_parent() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("attach")
+        .arg("1")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be its own parent"));
+}
+
+#[test]
+fn attach_is_idempotent() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("parent")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("child")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("attach")
+        .arg("2")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attached issue #2 to #1"));
+
+    cmd(Path::new(&db))
+        .arg("attach")
+        .arg("2")
+        .arg("--parent")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already attached"));
+}
+
+#[test]
+fn pretty_and_human_flags_are_accepted() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .arg("--pretty")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .arg("--human")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("list")
+        .arg("--pretty")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("frontier")
+        .arg("--pretty")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("blocked")
+        .arg("--pretty")
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("ready")
+        .arg("--pretty")
+        .assert()
+        .success();
+}
+
+#[test]
+fn pretty_piped_output_matches_plain() {
+    let (_dir, db) = create_test_db();
+    let body = "**bold** and `code`\n\n## H2\n\n- one\n- two\n";
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .arg("--body")
+        .arg(body)
+        .assert()
+        .success();
+    cmd(Path::new(&db))
+        .arg("comment")
+        .arg("1")
+        .arg("--body")
+        .arg("note")
+        .assert()
+        .success();
+
+    let plain = cmd(Path::new(&db)).arg("get").arg("1").output().unwrap();
+    let pretty = cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .arg("--pretty")
+        .output()
+        .unwrap();
+    assert_eq!(plain.status.code(), pretty.status.code());
+    assert_eq!(plain.stdout, pretty.stdout);
+
+    let list_plain = cmd(Path::new(&db)).arg("list").output().unwrap();
+    let list_pretty = cmd(Path::new(&db))
+        .arg("list")
+        .arg("--pretty")
+        .output()
+        .unwrap();
+    assert_eq!(list_plain.stdout, list_pretty.stdout);
 }

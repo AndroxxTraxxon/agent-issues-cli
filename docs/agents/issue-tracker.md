@@ -1,4 +1,4 @@
-pub const ISSUE_TRACKER_DOC: &str = r#"# Issue tracker: Local SQLite
+# Issue tracker: Local SQLite
 
 Issues for this repository are stored in the SQLite database at `.scratch/issues.db`.
 
@@ -99,4 +99,3 @@ The `--pretty` (aliased `--human`) flag renders markdown and colorizes output fo
 - ready-for-agent
 - ready-for-human
 - wontfix
-"#;
