@@ -953,3 +953,242 @@ fn pretty_piped_output_matches_plain() {
         .unwrap();
     assert_eq!(list_plain.stdout, list_pretty.stdout);
 }
+
+#[test]
+fn create_records_opened_at_from_flag() {
+    let (_dir, db) = create_test_db();
+    let sha = "a".repeat(40);
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .arg("--opened-at")
+        .arg(&sha)
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Opened at: {sha}")))
+        .stdout(predicate::str::contains("Resolved by").not());
+}
+
+#[test]
+fn close_records_resolved_by_from_flag() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    let sha = "b".repeat(40);
+    cmd(Path::new(&db))
+        .arg("close")
+        .arg("1")
+        .arg("--resolved-by")
+        .arg(&sha)
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Resolved by: {sha}")));
+}
+
+#[test]
+fn update_sets_and_clears_anchors() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    let opened = "c".repeat(40);
+    let resolved = "d".repeat(40);
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--opened-at")
+        .arg(&opened)
+        .arg("--resolved-by")
+        .arg(&resolved)
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Opened at: {opened}")))
+        .stdout(predicate::str::contains(format!("Resolved by: {resolved}")));
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--clear-opened-at")
+        .arg("--clear-resolved-by")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Opened at").not())
+        .stdout(predicate::str::contains("Resolved by").not());
+}
+
+#[test]
+fn update_rejects_conflicting_anchor_flags() {
+    let (_dir, db) = create_test_db();
+    cmd(Path::new(&db))
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .arg("update")
+        .arg("1")
+        .arg("--opened-at")
+        .arg("e")
+        .arg("--clear-opened-at")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mutually exclusive"));
+}
+
+#[test]
+fn create_outside_git_records_no_anchor() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir(&project).unwrap();
+    let db = dir.path().join("issues.db").display().to_string();
+
+    cmd(Path::new(&db))
+        .current_dir(&project)
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .current_dir(&project)
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Opened at").not())
+        .stdout(predicate::str::contains("Resolved by").not());
+}
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn init_git_repo(dir: &Path) -> String {
+    git_in(dir, &["init", "-q"]);
+    git_in(dir, &["config", "user.email", "test@example.com"]);
+    git_in(dir, &["config", "user.name", "Test"]);
+    std::fs::write(dir.join("file.txt"), "x").unwrap();
+    git_in(dir, &["add", "file.txt"]);
+    git_in(dir, &["commit", "-q", "-m", "init"]);
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn create_and_close_auto_stamp_head_in_git_repo() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let head = init_git_repo(&repo);
+    let db = dir.path().join("issues.db").display().to_string();
+
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Opened at: {head}")));
+
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("close")
+        .arg("1")
+        .assert()
+        .success();
+
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("get")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("Resolved by: {head}")));
+}
+
+#[test]
+fn unknown_commit_warns_in_repo() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_git_repo(&repo);
+    let db = dir.path().join("issues.db").display().to_string();
+
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("create")
+        .arg("--title")
+        .arg("t")
+        .assert()
+        .success();
+
+    let bogus = "f".repeat(40);
+    cmd(Path::new(&db))
+        .current_dir(&repo)
+        .arg("update")
+        .arg("1")
+        .arg("--opened-at")
+        .arg(&bogus)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("warning: commit"));
+}

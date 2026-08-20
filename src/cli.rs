@@ -71,12 +71,7 @@ pub enum Command {
         action: LabelAction,
     },
     /// Close an issue
-    Close {
-        id: i64,
-        /// Optional resolution comment to record before closing
-        #[arg(long)]
-        comment: Option<String>,
-    },
+    Close(CloseArgs),
     /// Add a comment to an issue
     Comment(CommentArgs),
     /// Add or remove a blocking dependency edge
@@ -115,6 +110,17 @@ pub struct MembershipArgs {
 }
 
 #[derive(Args)]
+pub struct CloseArgs {
+    pub id: i64,
+    /// Optional resolution comment to record before closing
+    #[arg(long)]
+    pub comment: Option<String>,
+    /// Commit that resolved this issue; defaults to git HEAD in a repository
+    #[arg(long)]
+    pub resolved_by: Option<String>,
+}
+
+#[derive(Args)]
 pub struct CreateArgs {
     /// Issue title
     #[arg(long)]
@@ -125,6 +131,9 @@ pub struct CreateArgs {
     /// Inline issue body (mutually exclusive with --body-file)
     #[arg(long)]
     pub body: Option<String>,
+    /// Commit the issue was opened at; defaults to git HEAD in a repository
+    #[arg(long)]
+    pub opened_at: Option<String>,
 }
 
 #[derive(Args)]
@@ -148,6 +157,18 @@ pub struct UpdateArgs {
     /// Path to a file whose contents are appended to the issue body
     #[arg(long, value_name = "PATH")]
     pub append_body_file: Option<PathBuf>,
+    /// Set the commit the issue was opened at
+    #[arg(long)]
+    pub opened_at: Option<String>,
+    /// Clear the commit the issue was opened at
+    #[arg(long)]
+    pub clear_opened_at: bool,
+    /// Set the commit that resolved the issue
+    #[arg(long)]
+    pub resolved_by: Option<String>,
+    /// Clear the commit that resolved the issue
+    #[arg(long)]
+    pub clear_resolved_by: bool,
 }
 
 #[derive(Subcommand)]

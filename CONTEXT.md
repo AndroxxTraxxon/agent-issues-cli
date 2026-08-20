@@ -47,3 +47,15 @@ _Avoid_: Pretty print, colored output
 **Agent view**:
 The default plain output, byte-stable, that agents parse. The human view must never change it.
 _Avoid_: Plain text, raw output
+
+**Commit anchor**:
+A commit hash recorded against an issue's lifecycle. An issue carries two: the opened-at commit and the resolved-by commit. Anchors tie the issue to the repository's history so it reads as the conversation between the commits that bracket it.
+_Avoid_: Git reference, commit link
+
+**Opened-at commit**:
+The commit an issue was created against. Recorded when the issue is created, from git HEAD when the working directory is a repository, or from the --opened-at flag.
+_Avoid_: Source commit, creation commit
+
+**Resolved-by commit**:
+The commit that resolved an issue. Recorded when the issue closes, from git HEAD when the working directory is a repository, or from the --resolved-by flag. Not every closure has one: without git, no anchor is recorded.
+_Avoid_: Destination commit, closing commit

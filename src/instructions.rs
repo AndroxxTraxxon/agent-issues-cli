@@ -2,7 +2,7 @@ pub const ISSUE_TRACKER_DOC: &str = r#"# Issue tracker: Local SQLite
 
 Issues for this repository are stored in the SQLite database at `.scratch/issues.db`.
 
-Do not manipulate the database directly. Use the `issues` CLI for all issue operations.
+Only touch the database through the `issues` CLI.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -20,14 +20,14 @@ Read an issue:
 
     issues label <id> add <role>
 
-Roles are the canonical triage labels below; the string used is the label name itself.
+The role is one of the triage labels below.
 
 ## Commands
 
 List issues:
 
     issues list
-    issues list --status ready-for-agent
+    issues list --label ready-for-agent
     issues list --label needs-triage
 
 Update an issue (status, title, or body):
@@ -37,6 +37,7 @@ Update an issue (status, title, or body):
     issues update <id> --body "<body>"
     issues update <id> --body-file "<path>"
     issues update <id> --append-body "<text>"
+    issues update <id> --append-body-file "<path>"
 
 Add/remove labels:
 
@@ -52,6 +53,19 @@ Add a comment:
 
     issues comment <id> --body "<text>"
     issues comment <id> --body-file "<path>"
+
+## Commit anchors
+
+Every issue records two commit anchors: the commit it was opened at and the commit that resolved it. Both come from git HEAD automatically when the working directory is a git repository, and both can be overridden or set by hand:
+
+    issues create --title "<title>" --opened-at <sha>
+    issues close <id> --resolved-by <sha>
+    issues update <id> --opened-at <sha>
+    issues update <id> --resolved-by <sha>
+    issues update <id> --clear-opened-at
+    issues update <id> --clear-resolved-by
+
+Outside a git repository (or without git installed) no anchor is recorded; the tracker does not fail. A hash that is absent from the repository warns but is still recorded.
 
 Add/remove a blocking dependency:
 
@@ -70,7 +84,7 @@ Used by `/wayfinder`.
 - **Map**: an issue labelled `wayfinder:map`. The map body holds the Destination / Notes / Decisions-so-far / Not yet specified / Out of scope sections.
 - **Child ticket**: an issue labelled `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`) attached to the map issue with `issues attach <id> --parent <map-id>`. Membership is not a blocker: the map staying open never blocks its children.
 - **Blocking**: an edge added with `issues depends add <issue-id> --on <dependency-id>`. A ticket is unblocked when every issue it depends on is closed.
-- **Frontier**: `issues frontier` (optionally `--label wayfinder:research` or `--map <map-id>`). Open, unblocked, parentless issues, first by id wins. Bare `frontier` excludes issues that have a parent, so a still-open map does not sit in the way.
+- **Frontier**: `issues frontier` (optionally `--label wayfinder:research` or `--map <map-id>`). Open, unblocked issues ordered by id ascending. Issues that are themselves maps (they have children) never appear. Bare `frontier` also drops any issue attached to a map; `--map <map-id>` restricts to that map's children.
 - **Blocked**: `issues blocked` lists open issues and which dependency is blocking each.
 - **Claim**: `issues update <id> --status in-progress` before any work.
 - **Resolve**: append the answer as a comment with `issues comment <id> --body "<answer>"`, then close with `issues close <id> --comment "<resolution>"`, and append a context pointer to the map's Decisions-so-far with `issues update <map-id> --append-body-file "<pointer-path>"`.
@@ -83,7 +97,7 @@ Open issues labelled `ready-for-agent` are fully specified and ready for an AFK 
 
 ## Human view
 
-The `--pretty` (aliased `--human`) flag renders markdown and colorizes output for people at a terminal. It only emits ANSI when stdout is a terminal, so the plain output is byte-stable. Agents should keep using the plain output.
+`--pretty`/`--human` is for people at a terminal. Use the plain output, which is byte-stable.
 
 ## Canonical statuses
 

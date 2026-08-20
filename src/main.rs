@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use issues::cli::{Cli, Command, DependsAction, LabelAction};
 use issues::db::{self, BlockedSummary, IssueDetail, IssueSummary};
+use issues::git;
 use issues::instructions;
 use issues::render;
 
@@ -26,7 +27,14 @@ fn main() -> Result<()> {
                     .with_context(|| format!("reading body file {}", path.display()))?,
                 None => args.body.unwrap_or_default(),
             };
-            let issue = db::create_issue(&conn, &args.title, &body)?;
+            let opened_at = match &args.opened_at {
+                Some(hash) => {
+                    warn_if_unknown_commit(hash);
+                    Some(hash.clone())
+                }
+                None => git::head(),
+            };
+            let issue = db::create_issue(&conn, &args.title, &body, opened_at.as_deref())?;
             println!("Created issue #{}: {}", issue.id, issue.title);
         }
         Command::List {
@@ -72,8 +80,14 @@ fn main() -> Result<()> {
                     || args.body_file.is_some()
                     || args.append_body.is_some()
                     || args.append_body_file.is_some()
+                    || args.opened_at.is_some()
+                    || args.clear_opened_at
+                    || args.resolved_by.is_some()
+                    || args.clear_resolved_by
                 {
-                    anyhow::bail!("--status cannot be combined with title or body edits");
+                    anyhow::bail!(
+                        "--status cannot be combined with title, body, or commit-anchor edits"
+                    );
                 }
                 let issue = db::update_status(&conn, args.id, status)?;
                 println!(
@@ -92,8 +106,42 @@ fn main() -> Result<()> {
                 {
                     anyhow::bail!("replace and append body options are mutually exclusive");
                 }
+                if args.opened_at.is_some() && args.clear_opened_at {
+                    anyhow::bail!("--opened-at and --clear-opened-at are mutually exclusive");
+                }
+                if args.resolved_by.is_some() && args.clear_resolved_by {
+                    anyhow::bail!("--resolved-by and --clear-resolved-by are mutually exclusive");
+                }
+                let opened_at_edit = match (&args.opened_at, args.clear_opened_at) {
+                    (Some(hash), false) => {
+                        warn_if_unknown_commit(hash);
+                        Some(Some(hash.as_str()))
+                    }
+                    (None, true) => Some(None),
+                    _ => None,
+                };
+                let resolved_by_edit = match (&args.resolved_by, args.clear_resolved_by) {
+                    (Some(hash), false) => {
+                        warn_if_unknown_commit(hash);
+                        Some(Some(hash.as_str()))
+                    }
+                    (None, true) => Some(None),
+                    _ => None,
+                };
                 let body_file = read_opt_file(args.body_file)?;
                 let append_body_file = read_opt_file(args.append_body_file)?;
+                let has_edit = body_file.is_some()
+                    || args.body.is_some()
+                    || args.title.is_some()
+                    || append_body_file.is_some()
+                    || args.append_body.is_some()
+                    || opened_at_edit.is_some()
+                    || resolved_by_edit.is_some();
+                if !has_edit {
+                    anyhow::bail!(
+                        "nothing to update; provide --status, --title, --body, --body-file, --append-body, --append-body-file, --opened-at, --resolved-by, --clear-opened-at, or --clear-resolved-by"
+                    );
+                }
                 let issue = if let Some(b) = &body_file {
                     db::update_issue(&conn, args.id, args.title.as_deref(), Some(b))?
                 } else if args.body.is_some() || args.title.is_some() {
@@ -103,9 +151,17 @@ fn main() -> Result<()> {
                 } else if let Some(t) = &args.append_body {
                     db::append_body(&conn, args.id, t)?
                 } else {
-                    anyhow::bail!(
-                        "nothing to update; provide --status, --title, --body, --body-file, --append-body, or --append-body-file"
-                    );
+                    db::get_issue(&conn, args.id)?.expect("issue exists").issue
+                };
+                let issue = if let Some(commit) = opened_at_edit {
+                    db::set_opened_at_commit(&conn, args.id, commit)?
+                } else {
+                    issue
+                };
+                let issue = if let Some(commit) = resolved_by_edit {
+                    db::set_resolved_by_commit(&conn, args.id, commit)?
+                } else {
+                    issue
                 };
                 println!("Updated issue #{}: {}", issue.id, issue.title);
             }
@@ -126,11 +182,18 @@ fn main() -> Result<()> {
                 }
             }
         },
-        Command::Close { id, comment } => {
-            let issue = db::close_issue(&conn, id)?;
+        Command::Close(args) => {
+            let resolved_by = match &args.resolved_by {
+                Some(hash) => {
+                    warn_if_unknown_commit(hash);
+                    Some(hash.clone())
+                }
+                None => git::head(),
+            };
+            let issue = db::close_issue(&conn, args.id, resolved_by.as_deref())?;
             println!("Closed issue #{}: {}", issue.id, issue.title);
-            if let Some(body) = comment {
-                let comment = db::add_comment(&conn, id, &body)?;
+            if let Some(body) = args.comment {
+                let comment = db::add_comment(&conn, args.id, &body)?;
                 println!("Added comment #{}", comment.id);
             }
         }
@@ -340,6 +403,12 @@ fn read_opt_file(path: Option<PathBuf>) -> Result<Option<String>> {
     }
 }
 
+fn warn_if_unknown_commit(hash: &str) {
+    if git::exists(hash) == Some(false) {
+        eprintln!("warning: commit {hash} is not in the current git repository");
+    }
+}
+
 fn label_text(labels: &[String]) -> String {
     if labels.is_empty() {
         "-".to_string()
@@ -359,6 +428,12 @@ fn print_detail(detail: &IssueDetail, pretty: bool) {
     println!("Labels: {}", label_text(&detail.labels));
     println!("Created: {}", issue.created_at);
     println!("Updated: {}", issue.updated_at);
+    if let Some(commit) = &issue.opened_at_commit {
+        println!("Opened at: {}", commit);
+    }
+    if let Some(commit) = &issue.resolved_by_commit {
+        println!("Resolved by: {}", commit);
+    }
 
     let blocked_by = join_ids(&detail.blocked_by);
     let blocks = join_ids(&detail.blocks);
@@ -403,6 +478,12 @@ fn print_detail_pretty(detail: &IssueDetail) {
     );
     println!("Created: {}", issue.created_at);
     println!("Updated: {}", issue.updated_at);
+    if let Some(commit) = &issue.opened_at_commit {
+        println!("Opened at: {}", commit);
+    }
+    if let Some(commit) = &issue.resolved_by_commit {
+        println!("Resolved by: {}", commit);
+    }
 
     let blocked_by = join_ids(&detail.blocked_by);
     let blocks = join_ids(&detail.blocks);

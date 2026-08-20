@@ -12,6 +12,8 @@ pub struct Issue {
     pub title: String,
     pub body: String,
     pub status: String,
+    pub opened_at_commit: Option<String>,
+    pub resolved_by_commit: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -67,6 +69,7 @@ pub fn open(path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening database at {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(&conn)?;
+    migrate(&conn)?;
     Ok(conn)
 }
 
@@ -78,6 +81,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             title TEXT NOT NULL,
             body TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'open',
+            opened_at_commit TEXT,
+            resolved_by_commit TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -124,15 +129,43 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn create_issue(conn: &Connection, title: &str, body: &str) -> Result<Issue> {
+fn migrate(conn: &Connection) -> Result<()> {
+    for column in ["opened_at_commit", "resolved_by_commit"] {
+        if !has_column(conn, "issues", column)? {
+            conn.execute_batch(&format!("ALTER TABLE issues ADD COLUMN {column} TEXT"))?;
+        }
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut found = false;
+    for name in names {
+        if name? == column {
+            found = true;
+            break;
+        }
+    }
+    Ok(found)
+}
+
+pub fn create_issue(
+    conn: &Connection,
+    title: &str,
+    body: &str,
+    opened_at: Option<&str>,
+) -> Result<Issue> {
     let title = title.trim();
     if title.is_empty() {
         bail!("title cannot be empty");
     }
     let now = now_rfc3339();
     conn.execute(
-        "INSERT INTO issues (title, body, status, created_at, updated_at) VALUES (?1, ?2, 'open', ?3, ?3)",
-        params![title, body, now],
+        "INSERT INTO issues (title, body, status, opened_at_commit, created_at, updated_at)
+         VALUES (?1, ?2, 'open', ?3, ?4, ?4)",
+        params![title, body, opened_at, now],
     )?;
     let id = conn.last_insert_rowid();
     Ok(fetch_issue(conn, id)?.expect("issue was just inserted"))
@@ -398,8 +431,32 @@ pub fn append_body(conn: &Connection, id: i64, text: &str) -> Result<Issue> {
     Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
 }
 
-pub fn close_issue(conn: &Connection, id: i64) -> Result<Issue> {
-    update_status(conn, id, "closed")
+pub fn close_issue(conn: &Connection, id: i64, resolved_by: Option<&str>) -> Result<Issue> {
+    update_status(conn, id, "closed")?;
+    if let Some(commit) = resolved_by {
+        set_resolved_by_commit(conn, id, Some(commit))?;
+    }
+    Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
+}
+
+pub fn set_opened_at_commit(conn: &Connection, id: i64, commit: Option<&str>) -> Result<Issue> {
+    ensure_issue_exists(conn, id)?;
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE issues SET opened_at_commit = ?1, updated_at = ?2 WHERE id = ?3",
+        params![commit, now, id],
+    )?;
+    Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
+}
+
+pub fn set_resolved_by_commit(conn: &Connection, id: i64, commit: Option<&str>) -> Result<Issue> {
+    ensure_issue_exists(conn, id)?;
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE issues SET resolved_by_commit = ?1, updated_at = ?2 WHERE id = ?3",
+        params![commit, now, id],
+    )?;
+    Ok(fetch_issue(conn, id)?.expect("issue was just updated"))
 }
 
 pub fn add_label(conn: &Connection, issue_id: i64, name: &str) -> Result<bool> {
@@ -496,7 +553,8 @@ pub fn remove_membership(conn: &Connection, issue_id: i64, parent_id: i64) -> Re
 
 fn fetch_issue(conn: &Connection, id: i64) -> Result<Option<Issue>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, body, status, created_at, updated_at FROM issues WHERE id = ?1",
+        "SELECT id, title, body, status, opened_at_commit, resolved_by_commit, created_at, updated_at
+         FROM issues WHERE id = ?1",
     )?;
     let issue = stmt
         .query_row(params![id], |row| {
@@ -505,8 +563,10 @@ fn fetch_issue(conn: &Connection, id: i64) -> Result<Option<Issue>> {
                 title: row.get(1)?,
                 body: row.get(2)?,
                 status: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+                opened_at_commit: row.get(4)?,
+                resolved_by_commit: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })
         .optional()?;
@@ -569,4 +629,55 @@ fn ensure_issue_exists(conn: &Connection, id: i64) -> Result<()> {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_migrates_db_without_anchor_columns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("issues.db");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE issues (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        drop(old);
+
+        let conn = open(&path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(issues)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(names.contains(&"opened_at_commit".to_string()));
+        assert!(names.contains(&"resolved_by_commit".to_string()));
+    }
+
+    #[test]
+    fn anchors_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = open(&dir.path().join("issues.db")).unwrap();
+
+        let issue = create_issue(&conn, "t", "", Some("abc123")).unwrap();
+        assert_eq!(issue.opened_at_commit.as_deref(), Some("abc123"));
+        assert_eq!(issue.resolved_by_commit, None);
+
+        let issue = close_issue(&conn, issue.id, Some("def456")).unwrap();
+        assert_eq!(issue.status, "closed");
+        assert_eq!(issue.resolved_by_commit.as_deref(), Some("def456"));
+
+        let issue = set_resolved_by_commit(&conn, issue.id, None).unwrap();
+        assert_eq!(issue.resolved_by_commit, None);
+    }
 }
