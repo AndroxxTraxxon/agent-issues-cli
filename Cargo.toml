@@ -2,6 +2,8 @@
 name = "issues"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "CLI for managing agent issues in a local SQLite store"
 
 [dependencies]
 anyhow = "1.0.104"
