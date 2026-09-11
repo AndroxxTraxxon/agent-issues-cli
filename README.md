@@ -12,6 +12,28 @@ cargo install --path .
 
 The binary is named `issues`.
 
+## Pi extension
+
+This repository includes a Pi extension that exposes the `issues` CLI as an
+LLM-callable `issues` tool. The extension uses the current Pi session directory
+as its working directory, defaults to `.scratch/issues.db`, invokes the CLI
+without a shell, and serializes mutations against the database.
+
+Install the CLI and the extension together:
+
+```bash
+./scripts/install-pi-extension.sh
+```
+
+The installer:
+
+- installs the Rust binary into `${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin`;
+- copies `extensions/issues.ts` into `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/`;
+- leaves the repository's source files untouched.
+
+Run `/reload` in Pi after installation (or restart Pi). If the Cargo bin
+directory is not already on `PATH`, add it before starting Pi.
+
 ## Commands
 
 Create an issue:
